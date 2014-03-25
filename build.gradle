@@ -1,0 +1,21 @@
+apply plugin: 'java'
+apply plugin: 'eclipse'
+
+group = 'com.limelight'
+version = '1.0'
+
+sourceCompatibility = 1.5
+targetCompatibility = 1.5
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    compile 'xpp3:xpp3:1.1.4c'
+}
+
+task wrapper(type: Wrapper) {
+    gradleVersion = '1.10'
+}
