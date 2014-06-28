@@ -16,7 +16,7 @@ public class AudioStream {
 	public static final int RTP_PORT = 48000;
 	public static final int RTCP_PORT = 47999;
 	
-	public static final int RTP_RECV_BUFFER = 64 * 1024;
+	public static final int RTP_RECV_BUFFER = 12 * 100;
 	public static final int MAX_PACKET_SIZE = 100;
 	
 	private DatagramSocket rtp;
@@ -165,6 +165,7 @@ public class AudioStream {
 		};
 		threads.add(t);
 		t.setName("Audio - Receive");
+		t.setPriority(Thread.MAX_PRIORITY);
 		t.start();
 	}
 	
