@@ -53,7 +53,7 @@ public class NvHTTP {
 	public static final int CONNECTION_TIMEOUT = 3000;
 	public static final int READ_TIMEOUT = 5000;
 	
-	private static boolean verbose = false;
+	private static boolean verbose = true;
 
 	public String baseUrlHttps;
 	public String baseUrlHttp;
@@ -554,7 +554,7 @@ public class NvHTTP {
 			"&appid=" + appId +
 			"&mode=" + context.negotiatedWidth + "x" + context.negotiatedHeight + "x" + context.negotiatedFps +
 			"&additionalStates=1&sops=" + (context.streamConfig.getSops() ? 1 : 0) +
-			"&rikey="+bytesToHex(context.riKey.getEncoded()) +
+			"&rikey="+bytesToHex(new byte[16]) +
 			"&rikeyid="+context.riKeyId +
 			"&localAudioPlayMode=" + (context.streamConfig.getPlayLocalAudio() ? 1 : 0) +
 			"&surroundAudioInfo=" + ((context.streamConfig.getAudioChannelMask() << 16) + context.streamConfig.getAudioChannelCount()),
@@ -565,7 +565,7 @@ public class NvHTTP {
 	
 	public boolean resumeApp(ConnectionContext context) throws IOException, XmlPullParserException {
 		String xmlStr = openHttpConnectionToString(baseUrlHttps + "/resume?" + buildUniqueIdUuidString() +
-				"&rikey="+bytesToHex(context.riKey.getEncoded()) +
+				"&rikey="+bytesToHex(new byte[16]) +
 				"&rikeyid="+context.riKeyId, false);
 		String resume = getXmlString(xmlStr, "resume");
 		return Integer.parseInt(resume) != 0;

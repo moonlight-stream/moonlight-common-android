@@ -61,7 +61,7 @@ public class NvConnection {
 			e.printStackTrace();
 		}
 		
-		this.context.riKeyId = generateRiKeyId();
+		this.context.riKeyId = 0; //generateRiKeyId();
 		
 		this.context.negotiatedVideoFormat = VideoFormat.Unknown;
 	}
@@ -314,7 +314,8 @@ public class NvConnection {
 				{
 				case LAUNCH_APP:
 					success = startApp();
-					break;
+					return;
+					//break;
 
 				case RTSP_HANDSHAKE:
 					success = doRtspHandshake();
