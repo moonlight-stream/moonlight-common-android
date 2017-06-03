@@ -1,284 +1,131 @@
 package com.limelight.nvstream.mdns;
 
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.net.Inet4Address;
+import android.content.Context;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
+import android.os.Handler;
+
 import java.net.InetAddress;
-import java.net.NetworkInterface;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-
-import javax.jmdns.JmmDNS;
-import javax.jmdns.NetworkTopologyDiscovery;
-import javax.jmdns.ServiceEvent;
-import javax.jmdns.ServiceInfo;
-import javax.jmdns.ServiceListener;
-import javax.jmdns.impl.NetworkTopologyDiscoveryImpl;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import com.limelight.LimeLog;
 
-public class MdnsDiscoveryAgent implements ServiceListener {
-	public static final String SERVICE_TYPE = "_nvstream._tcp.local.";
+public class MdnsDiscoveryAgent implements NsdManager.DiscoveryListener {
+	public static final String SERVICE_TYPE = "_nvstream._tcp";
 	
 	private MdnsDiscoveryListener listener;
-	private Thread discoveryThread;
-	private HashMap<InetAddress, MdnsComputer> computers = new HashMap<InetAddress, MdnsComputer>();
-	private HashSet<String> pendingResolution = new HashSet<String>();
+	private NsdManager nsdManager;
+	private HashMap<InetAddress, MdnsComputer> computers = new HashMap<>();
+	private Thread resolveThread;
+	private LinkedBlockingQueue<NsdServiceInfo> pendingResolution = new LinkedBlockingQueue<>();
+	private boolean started = false;
 	
-	// The resolver factory's instance member has a static lifetime which
-	// means our ref count and listener must be static also.
-	private static int resolverRefCount = 0;
-	private static HashSet<ServiceListener> listeners = new HashSet<ServiceListener>();
-	private static ServiceListener nvstreamListener = new ServiceListener() {
-		@Override
-		public void serviceAdded(ServiceEvent event) {
-			HashSet<ServiceListener> localListeners;
-			
-			// Copy the listener set into a new set so we can invoke
-			// the callbacks without holding the listeners monitor the
-			// whole time.
-			synchronized (listeners) {
-				localListeners = new HashSet<ServiceListener>(listeners);
-			}
-			
-			for (ServiceListener listener : localListeners) {
-				listener.serviceAdded(event);
-			}
-		}
-
-		@Override
-		public void serviceRemoved(ServiceEvent event) {
-			HashSet<ServiceListener> localListeners;
-			
-			// Copy the listener set into a new set so we can invoke
-			// the callbacks without holding the listeners monitor the
-			// whole time.
-			synchronized (listeners) {
-				localListeners = new HashSet<ServiceListener>(listeners);
-			}
-			
-			for (ServiceListener listener : localListeners) {
-				listener.serviceRemoved(event);
-			}
-		}
-
-		@Override
-		public void serviceResolved(ServiceEvent event) {
-			HashSet<ServiceListener> localListeners;
-			
-			// Copy the listener set into a new set so we can invoke
-			// the callbacks without holding the listeners monitor the
-			// whole time.
-			synchronized (listeners) {
-				localListeners = new HashSet<ServiceListener>(listeners);
-			}
-			
-			for (ServiceListener listener : localListeners) {
-				listener.serviceResolved(event);
-			}
-		}
-	};
-
-	public static class MyNetworkTopologyDiscovery extends NetworkTopologyDiscoveryImpl {
-		@Override
-		public boolean useInetAddress(NetworkInterface networkInterface, InetAddress interfaceAddress) {
-			// This is an exact copy of jmDNS's implementation, except we omit the multicast check, since
-			// it seems at least some devices lie about interfaces not supporting multicast when they really do.
-			try {
-				if (!networkInterface.isUp()) {
-					return false;
-				}
-
-				/*
-				if (!networkInterface.supportsMulticast()) {
-					return false;
-				}
-				*/
-
-				if (networkInterface.isLoopback()) {
-					return false;
-				}
-
-				return true;
-			} catch (Exception exception) {
-				return false;
-			}
-		}
-	};
-
-	static {
-		// Override jmDNS's default topology discovery class with ours
-		NetworkTopologyDiscovery.Factory.setClassDelegate(new NetworkTopologyDiscovery.Factory.ClassDelegate() {
-			@Override
-			public NetworkTopologyDiscovery newNetworkTopologyDiscovery() {
-				return new MyNetworkTopologyDiscovery();
-			}
-		});
-	}
-
-	private static JmmDNS referenceResolver() {
-		synchronized (MdnsDiscoveryAgent.class) {
-			JmmDNS instance = JmmDNS.Factory.getInstance();
-			if (++resolverRefCount == 1) {
-				// This will cause the listener to be invoked for known hosts immediately.
-				// JmDNS only supports one listener per service, so we have to do this here
-				// with a static listener.
-				instance.addServiceListener(SERVICE_TYPE, nvstreamListener);
-			}
-			return instance;
-		}
-	}
-	
-	private static void dereferenceResolver() {
-		synchronized (MdnsDiscoveryAgent.class) {
-			if (--resolverRefCount == 0) {
-				try {
-					JmmDNS.Factory.close();
-				} catch (IOException e) {}
-			}
-		}
-	}
-	
-	public MdnsDiscoveryAgent(MdnsDiscoveryListener listener) {
+	public MdnsDiscoveryAgent(Context context, MdnsDiscoveryListener listener) {
 		this.listener = listener;
+		this.nsdManager = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
 	}
 	
-	private void handleResolvedServiceInfo(ServiceInfo info) {
-		pendingResolution.remove(info.getName());
-		
-		try {
-			handleServiceInfo(info);
-		} catch (UnsupportedEncodingException e) {
-			// Invalid DNS response
-			LimeLog.info("mDNS: Invalid response for machine: "+info.getName());
-			return;
-		}
-	}
-	
-	private void handleServiceInfo(ServiceInfo info) throws UnsupportedEncodingException {	
-		Inet4Address addrs[] = info.getInet4Addresses();
-		
-		LimeLog.info("mDNS: "+info.getName()+" has "+addrs.length+" addresses");
-		
-		// Add a computer object for each IPv4 address reported by the PC
-		for (Inet4Address addr : addrs) {
-			synchronized (computers) {
-				MdnsComputer computer = new MdnsComputer(info.getName(), addr);
-				if (computers.put(computer.getAddress(), computer) == null) {
-					// This was a new entry
-					listener.notifyComputerAdded(computer);
-				}
-			}
-		}
-	}
-	
-	public void startDiscovery(final int discoveryIntervalMs) {
-		// Kill any existing discovery before starting a new one
-		stopDiscovery();
-		
-		// Add our listener to the set
-		synchronized (listeners) {
-			listeners.add(MdnsDiscoveryAgent.this);
-		}
-		
-		discoveryThread = new Thread() {
-			@Override
-			public void run() {
-				// This may result in listener callbacks so we must register
-				// our listener first.
-				JmmDNS resolver = referenceResolver();
-				
-				try {
-					while (!Thread.interrupted()) {
-						// Start an mDNS request
-						resolver.requestServiceInfo(SERVICE_TYPE, null, discoveryIntervalMs);
-						
-						// Run service resolution again for pending machines
-						ArrayList<String> pendingNames = new ArrayList<String>(pendingResolution);
-						for (String name : pendingNames) {
-							LimeLog.info("mDNS: Retrying service resolution for machine: "+name);
-							ServiceInfo[] infos = resolver.getServiceInfos(SERVICE_TYPE, name, 500);
-							if (infos != null && infos.length != 0) {
-								LimeLog.info("mDNS: Resolved (retry) with "+infos.length+" service entries");
-								for (ServiceInfo svcinfo : infos) {
-									handleResolvedServiceInfo(svcinfo);
-								}
-							}
-						}
-						
-						// Wait for the next polling interval
+	public void startDiscovery() {
+		if (!started) {
+			pendingResolution.clear();
+
+			resolveThread = new Thread() {
+				@Override
+				public void run() {
+					while (!isInterrupted()) {
 						try {
-							Thread.sleep(discoveryIntervalMs);
+							nsdManager.resolveService(pendingResolution.poll(Long.MAX_VALUE, TimeUnit.DAYS),
+									new NsdManager.ResolveListener() {
+								@Override
+								public void onResolveFailed(final NsdServiceInfo serviceInfo, int errorCode) {
+									LimeLog.info("mDNS: Failed to resolve "+serviceInfo.getServiceName()+": "+errorCode);
+									new Handler().postDelayed(new Runnable() {
+										@Override
+										public void run() {
+											if (started) {
+												LimeLog.info("mDNS: Retrying resolution for "+serviceInfo.getServiceName());
+												pendingResolution.offer(serviceInfo);
+											}
+										}
+									}, 1000);
+								}
+
+								@Override
+								public void onServiceResolved(NsdServiceInfo serviceInfo) {
+									LimeLog.info("mDNS: Machine resolved: "+serviceInfo.getServiceName()+" -> "+serviceInfo.getHost());
+									MdnsComputer computer = new MdnsComputer(serviceInfo.getServiceName(), serviceInfo.getHost());
+									if (computers.put(computer.getAddress(), computer) == null) {
+										// This was a new entry
+										listener.notifyComputerAdded(computer);
+									}
+								}
+							});
 						} catch (InterruptedException e) {
 							break;
 						}
 					}
 				}
-				finally {
-					// Dereference the resolver
-					dereferenceResolver();
-				}
-			}
-		};
-		discoveryThread.setName("mDNS Discovery Thread");
-		discoveryThread.start();
+			};
+			resolveThread.setName("mDNS Resolver Thread");
+			resolveThread.start();
+
+			nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, this);
+
+			started = true;
+		}
 	}
 	
 	public void stopDiscovery() {
-		// Remove our listener from the set
-		synchronized (listeners) {
-			listeners.remove(MdnsDiscoveryAgent.this);
-		}
-		
-		// If there's already a running thread, interrupt it
-		if (discoveryThread != null) {
-			discoveryThread.interrupt();
-			discoveryThread = null;
+		if (started) {
+			nsdManager.stopServiceDiscovery(this);
+
+			resolveThread.interrupt();
+			try {
+				resolveThread.join();
+			} catch (InterruptedException e) {}
+
+			started = false;
 		}
 	}
 	
 	public List<MdnsComputer> getComputerSet() {
 		synchronized (computers) {
-			return new ArrayList<MdnsComputer>(computers.values());
+			return new ArrayList<>(computers.values());
 		}
 	}
 
 	@Override
-	public void serviceAdded(ServiceEvent event) {
-		LimeLog.info("mDNS: Machine appeared: "+event.getInfo().getName());
-
-		ServiceInfo info = event.getDNS().getServiceInfo(SERVICE_TYPE, event.getInfo().getName(), 500);
-		if (info == null) {
-			// This machine is pending resolution
-			pendingResolution.add(event.getInfo().getName());
-			return;
-		}
-		
-		LimeLog.info("mDNS: Resolved (blocking)");
-		handleResolvedServiceInfo(info);
+	public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+		LimeLog.warning("mDNS: Failed to start service discovery: "+errorCode);
 	}
 
 	@Override
-	public void serviceRemoved(ServiceEvent event) {
-		LimeLog.info("mDNS: Machine disappeared: "+event.getInfo().getName());
-		
-		Inet4Address addrs[] = event.getInfo().getInet4Addresses();
-		for (Inet4Address addr : addrs) {
-			synchronized (computers) {
-				MdnsComputer computer = computers.remove(addr);
-				if (computer != null) {
-					listener.notifyComputerRemoved(computer);
-					break;
-				}
-			}
-		}
+	public void onStopDiscoveryFailed(String serviceType, int errorCode) {
+		LimeLog.warning("mDNS: Failed to stop service discovery: "+errorCode);
 	}
 
 	@Override
-	public void serviceResolved(ServiceEvent event) {
-		LimeLog.info("mDNS: Machine resolved (callback): "+event.getInfo().getName());
-		handleResolvedServiceInfo(event.getInfo());
+	public void onDiscoveryStarted(String serviceType) {
+		LimeLog.info("mDNS: Discovery started");
+	}
+
+	@Override
+	public void onDiscoveryStopped(String serviceType) {
+		LimeLog.info("mDNS: Discovery stopped");
+	}
+
+	@Override
+	public void onServiceFound(NsdServiceInfo serviceInfo) {
+		LimeLog.info("mDNS: Machine appeared: "+serviceInfo.getServiceName());
+		pendingResolution.offer(serviceInfo);
+	}
+
+	@Override
+	public void onServiceLost(NsdServiceInfo serviceInfo) {
+		LimeLog.info("mDNS: Machine disappeared: "+serviceInfo.getServiceName());
 	}
 }
