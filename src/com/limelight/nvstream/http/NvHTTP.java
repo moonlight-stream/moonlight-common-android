@@ -264,7 +264,7 @@ public class NvHTTP {
 	// on the GFE server. Examples of queries that DO require outside action are launch, resume, and quit.
 	// The initial pair query does require outside action (user entering a PIN) but subsequent pairing
 	// queries do not.
-	private ResponseBody openHttpConnection(String url, boolean enableReadTimeout) throws IOException {
+	ResponseBody openHttpConnection(String url, boolean enableReadTimeout) throws IOException {
 		Request request = new Request.Builder().url(url).build();
 		Response response;
 		
